@@ -1,0 +1,1089 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spatial Map Control - 空间手势地图控制系统</title>
+    <!-- MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+    <!-- Leaflet Map -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #0a0a0f;
+            color: #fff;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        /* ===== 主地图区域 ===== */
+        #map {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 1;
+        }
+
+        /* ===== 手势光标 ===== */
+        #handCursor {
+            position: fixed;
+            width: 40px; height: 40px;
+            border: 3px solid #00d4ff;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 1000;
+            transform: translate(-50%, -50%);
+            transition: width 0.15s, height 0.15s, border-color 0.15s, background 0.15s;
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.5), inset 0 0 20px rgba(0, 212, 255, 0.2);
+            display: none;
+        }
+        #handCursor.clicking {
+            width: 24px; height: 24px;
+            border-color: #ff006e;
+            background: rgba(255, 0, 110, 0.3);
+            box-shadow: 0 0 30px rgba(255, 0, 110, 0.7), inset 0 0 20px rgba(255, 0, 110, 0.3);
+        }
+        #handCursor.panning {
+            width: 50px; height: 50px;
+            border-color: #ffaa00;
+            background: rgba(255, 170, 0, 0.15);
+            box-shadow: 0 0 25px rgba(255, 170, 0, 0.5), inset 0 0 15px rgba(255, 170, 0, 0.15);
+        }
+        #handCursor .cursor-label {
+            position: absolute;
+            top: -28px; left: 50%;
+            transform: translateX(-50%);
+            font-size: 11px;
+            font-weight: 600;
+            white-space: nowrap;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 3px 10px;
+            border-radius: 12px;
+            color: #00d4ff;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+        }
+
+        /* ===== 角落视频面板 ===== */
+        .video-panel {
+            position: fixed;
+            bottom: 20px; right: 20px;
+            width: 280px;
+            z-index: 100;
+            border-radius: 16px;
+            overflow: hidden;
+            background: rgba(10, 10, 15, 0.85);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            transition: transform 0.3s, opacity 0.3s;
+        }
+        .video-panel.hidden {
+            transform: scale(0.1);
+            opacity: 0;
+            pointer-events: none;
+        }
+        .video-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 14px;
+            background: rgba(0, 0, 0, 0.4);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .video-header .title {
+            font-size: 12px;
+            font-weight: 600;
+            color: #aaa;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .video-header .dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #ff4444;
+            transition: background 0.3s;
+        }
+        .video-header .dot.active { background: #00ff88; box-shadow: 0 0 8px #00ff88; }
+        .video-header .close-btn {
+            width: 24px; height: 24px;
+            border: none;
+            background: rgba(255, 255, 255, 0.1);
+            color: #888;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+        .video-header .close-btn:hover {
+            background: rgba(255, 0, 0, 0.3);
+            color: #ff4444;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 4/3;
+            background: #000;
+        }
+        .video-container video {
+            width: 100%; height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+        .video-container canvas {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            transform: scaleX(-1);
+        }
+
+        /* ===== 重新开启摄像头按钮 ===== */
+        .cam-reopen-btn {
+            position: fixed;
+            bottom: 20px; right: 20px;
+            width: 48px; height: 48px;
+            border-radius: 50%;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(10, 10, 15, 0.85);
+            backdrop-filter: blur(20px);
+            color: #00d4ff;
+            font-size: 20px;
+            cursor: pointer;
+            z-index: 100;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        }
+        .cam-reopen-btn:hover {
+            background: rgba(0, 212, 255, 0.2);
+            border-color: rgba(0, 212, 255, 0.3);
+            transform: scale(1.1);
+        }
+        .cam-reopen-btn.visible { display: flex; }
+
+        /* ===== 顶部信息栏 ===== */
+        .top-bar {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            z-index: 50;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 20px;
+            background: rgba(10, 10, 15, 0.7);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .top-bar .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .top-bar .brand-icon {
+            width: 32px; height: 32px;
+            background: linear-gradient(135deg, #00d4ff, #7b2cbf);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+        .top-bar .brand-text h1 {
+            font-size: 15px;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+        }
+        .top-bar .brand-text p {
+            font-size: 11px;
+            color: #888;
+        }
+        .top-bar .gesture-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 13px;
+        }
+        .top-bar .gesture-badge .icon { font-size: 18px; }
+        .top-bar .gesture-badge .text { font-weight: 500; }
+        .top-bar .gesture-badge .sub { font-size: 11px; color: #888; margin-left: 4px; }
+
+        /* ===== 左侧手势指南 ===== */
+        .gesture-guide {
+            position: fixed;
+            left: 20px; top: 50%;
+            transform: translateY(-50%);
+            z-index: 50;
+            width: 200px;
+            background: rgba(10, 10, 15, 0.8);
+            backdrop-filter: blur(20px);
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        }
+        .gesture-guide h3 {
+            font-size: 13px;
+            font-weight: 600;
+            color: #aaa;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .gesture-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px;
+            border-radius: 10px;
+            margin-bottom: 6px;
+            transition: all 0.3s;
+            border: 1px solid transparent;
+        }
+        .gesture-item:hover { background: rgba(255, 255, 255, 0.03); }
+        .gesture-item.active {
+            background: rgba(0, 212, 255, 0.1);
+            border-color: rgba(0, 212, 255, 0.3);
+        }
+        .gesture-item .emoji {
+            font-size: 22px;
+            width: 36px;
+            text-align: center;
+        }
+        .gesture-item .info .name {
+            font-size: 13px;
+            font-weight: 500;
+        }
+        .gesture-item .info .desc {
+            font-size: 11px;
+            color: #888;
+            margin-top: 2px;
+        }
+
+        /* ===== 底部状态栏 ===== */
+        .bottom-bar {
+            position: fixed;
+            bottom: 80px; left: 20px;
+            z-index: 50;
+            display: flex;
+            gap: 12px;
+        }
+        .status-pill {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: rgba(10, 10, 15, 0.8);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 12px;
+        }
+        .status-pill .dot {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: #444;
+        }
+        .status-pill .dot.on { background: #00ff88; box-shadow: 0 0 6px #00ff88; }
+
+        /* ===== 启动按钮 ===== */
+        .start-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 2000;
+            background: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(10px);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.5s;
+        }
+        .start-overlay.hidden { opacity: 0; pointer-events: none; }
+        .start-overlay h2 {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .start-overlay p {
+            color: #888;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        .start-btn {
+            padding: 14px 36px;
+            font-size: 15px;
+            font-weight: 600;
+            color: #fff;
+            background: linear-gradient(135deg, #00d4ff, #0099cc);
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 20px rgba(0, 212, 255, 0.3);
+        }
+        .start-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 30px rgba(0, 212, 255, 0.5);
+        }
+
+        /* ===== 加载 ===== */
+        .loading-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 3000;
+            background: #0a0a0f;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.5s;
+        }
+        .loading-overlay.hidden { opacity: 0; pointer-events: none; }
+        .spinner {
+            width: 50px; height: 50px;
+            border: 3px solid rgba(0, 212, 255, 0.2);
+            border-top-color: #00d4ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .loading-text {
+            margin-top: 16px;
+            font-size: 13px;
+            color: #888;
+        }
+
+        /* ===== 地图自定义样式 ===== */
+        .leaflet-control-zoom { display: none !important; }
+        .leaflet-control-attribution { background: rgba(0,0,0,0.6) !important; color: #888 !important; }
+        .leaflet-control-attribution a { color: #aaa !important; }
+        .leaflet-control-layers {
+            background: rgba(10, 10, 15, 0.9) !important;
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255,255,255,0.08) !important;
+            border-radius: 12px !important;
+            padding: 10px !important;
+            color: #fff !important;
+        }
+        .leaflet-control-layers-list label {
+            color: #ddd !important;
+            font-size: 13px;
+        }
+        .leaflet-control-layers-toggle {
+            background-color: rgba(10,10,15,0.9) !important;
+            border: 1px solid rgba(255,255,255,0.08) !important;
+            border-radius: 8px !important;
+        }
+
+        /* ===== 缩放指示器 ===== */
+        .zoom-indicator {
+            position: fixed;
+            right: 320px; bottom: 20px;
+            z-index: 50;
+            padding: 8px 16px;
+            background: rgba(10, 10, 15, 0.8);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 12px;
+            color: #888;
+        }
+        .zoom-indicator span { color: #00d4ff; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <!-- 加载界面 -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div class="loading-text">正在加载 AI 模型与地图...</div>
+    </div>
+
+    <!-- 启动界面 -->
+    <div class="start-overlay" id="startOverlay">
+        <h2>Spatial Map Control</h2>
+        <p>基于 Google MediaPipe 手势识别 · 天地图空间交互</p>
+        <button class="start-btn" onclick="startSystem()">▶ 启动系统</button>
+    </div>
+
+    <!-- 手势光标 -->
+    <div id="handCursor">
+        <div class="cursor-label" id="cursorLabel">悬停</div>
+    </div>
+
+    <!-- 地图 -->
+    <div id="map"></div>
+
+    <!-- 顶部栏 -->
+    <div class="top-bar">
+        <div class="brand">
+            <div class="brand-icon">🌍</div>
+            <div class="brand-text">
+                <h1>Spatial Map Control</h1>
+                <p>手势驱动的空间交互地图</p>
+            </div>
+        </div>
+        <div class="gesture-badge" id="gestureBadge">
+            <span class="icon">✋</span>
+            <span class="text" id="gestureText">等待手势</span>
+            <span class="sub" id="gestureSub">请将手放在摄像头前</span>
+        </div>
+    </div>
+
+    <!-- 左侧手势指南 -->
+    <div class="gesture-guide">
+        <h3>手势控制指南</h3>
+        <div class="gesture-item" id="guide-hover">
+            <span class="emoji">☝️</span>
+            <div class="info">
+                <div class="name">光标移动</div>
+                <div class="desc">伸出食指移动光标</div>
+            </div>
+        </div>
+        <div class="gesture-item" id="guide-pan">
+            <span class="emoji">🤏</span>
+            <div class="info">
+                <div class="name">地图平移</div>
+                <div class="desc">拇指+食指捏合后拖动</div>
+            </div>
+        </div>
+        <div class="gesture-item" id="guide-click">
+            <span class="emoji">🤟</span>
+            <div class="info">
+                <div class="name">点击选择</div>
+                <div class="desc">拇指+中指捏合</div>
+            </div>
+        </div>
+        <div class="gesture-item" id="guide-zoom-in">
+            <span class="emoji">🔍</span>
+            <div class="info">
+                <div class="name">放大/缩小</div>
+                <div class="desc">双手捏合远离=放大，张开→握拳=缩小</div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- 底部状态 -->
+    <div class="bottom-bar">
+        <div class="status-pill">
+            <div class="dot" id="handDot"></div>
+            <span id="handStatusText">手部未检测</span>
+        </div>
+        <div class="status-pill">
+            <span id="fpsDisplay">FPS: 0</span>
+        </div>
+    </div>
+
+    <!-- 缩放指示 -->
+    <div class="zoom-indicator">
+        缩放级别: <span id="zoomLevel">13</span>
+    </div>
+
+    <!-- 视频面板 -->
+    <div class="video-panel" id="videoPanel">
+        <div class="video-header">
+            <div class="title">
+                <div class="dot" id="camDot"></div>
+                摄像头预览
+            </div>
+            <button class="close-btn" onclick="toggleCamera()" title="关闭摄像头">✕</button>
+        </div>
+        <div class="video-container">
+            <video id="inputVideo" playsinline></video>
+            <canvas id="outputCanvas"></canvas>
+        </div>
+    </div>
+
+    <!-- 重新开启摄像头按钮 -->
+    <button class="cam-reopen-btn" id="camReopenBtn" onclick="toggleCamera()" title="开启摄像头">📷</button>
+
+    <script>
+        // ==================== 全局变量 ====================
+        const videoElement = document.getElementById('inputVideo');
+        const canvasElement = document.getElementById('outputCanvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const cursor = document.getElementById('handCursor');
+        const cursorLabel = document.getElementById('cursorLabel');
+
+        let hands, faceMesh, camera;
+        let isRunning = false;
+        let cameraActive = true;
+        let map;
+
+        // 手势状态
+        let handState = {
+            cursorX: window.innerWidth / 2,
+            cursorY: window.innerHeight / 2,
+            prevGesture: 'none',
+            panStartPos: null,
+            mapStartCenter: null,
+            isPanning: false,
+            pinchCooldown: false,         // 捏合点击冷却
+            pinchStartTime: 0,            // 捏合开始时间
+            lastTwoHandDistance: null,     // 双手缩放距离
+            lastZoomTime: 0,              // 缩放冷却
+            zoomOutStep: 0,               // 缩小组合手势进度：0=未开始, 1=已张开手掌, 2=已握拳
+            zoomOutTimeout: null,          // 缩小组合手势超时定时器
+            smoothCursorX: window.innerWidth / 2,
+            smoothCursorY: window.innerHeight / 2
+        };
+
+        // FPS 计算
+        let lastTime = 0, frameCount = 0, fps = 0;
+
+        // ==================== 初始化地图 ====================
+        function initMap() {
+            map = L.map('map', {
+                zoomControl: false,
+                attributionControl: true,
+                doubleClickZoom: false,
+                boxZoom: false,
+                keyboard: false
+            }).setView([39.9042, 116.4074], 13);
+
+            // 天地图矢量底图（墨卡托投影）
+            const tdtToken = 'YOUR_TIANDITU_TOKEN'; // 请替换为你自己的天地图 API Token
+            const vecUrl = 'https://t{s}.tianditu.gov.cn/DataServer?T=vec_w&x={x}&y={y}&l={z}&tk=' + tdtToken;
+            const cvaUrl = 'https://t{s}.tianditu.gov.cn/DataServer?T=cva_w&x={x}&y={y}&l={z}&tk=' + tdtToken;
+            const imgUrl = 'https://t{s}.tianditu.gov.cn/DataServer?T=img_w&x={x}&y={y}&l={z}&tk=' + tdtToken;
+            const ciaUrl = 'https://t{s}.tianditu.gov.cn/DataServer?T=cia_w&x={x}&y={y}&l={z}&tk=' + tdtToken;
+
+            const vecLayer = L.tileLayer(vecUrl, {
+                subdomains: '01234567',
+                maxZoom: 18,
+                attribution: '&copy; <a href="https://map.tianditu.gov.cn/">天地图</a>'
+            });
+            const cvaLayer = L.tileLayer(cvaUrl, {
+                subdomains: '01234567',
+                maxZoom: 18
+            });
+            const imgLayer = L.tileLayer(imgUrl, {
+                subdomains: '01234567',
+                maxZoom: 18,
+                attribution: '&copy; <a href="https://map.tianditu.gov.cn/">天地图</a>'
+            });
+            const ciaLayer = L.tileLayer(ciaUrl, {
+                subdomains: '01234567',
+                maxZoom: 18
+            });
+
+            // 图层切换控件
+            const baseLayers = {
+                '矢量地图': L.layerGroup([vecLayer, cvaLayer]),
+                '影像地图': L.layerGroup([imgLayer, ciaLayer])
+            };
+            L.control.layers(baseLayers, null, {
+                position: 'bottomleft',
+                collapsed: false
+            }).addTo(map);
+
+            // 默认显示矢量底图
+            map.addLayer(baseLayers['矢量地图']);
+
+            // 监听缩放变化
+            map.on('zoomend', () => {
+                document.getElementById('zoomLevel').textContent = map.getZoom();
+            });
+
+            // 添加示例标记点
+            const locations = [
+                { lat: 39.9042, lng: 116.4074, name: '天安门' },
+                { lat: 39.9990, lng: 116.2750, name: '颐和园' },
+                { lat: 39.8822, lng: 116.3975, name: '天坛' },
+                { lat: 39.9163, lng: 116.3972, name: '故宫' }
+            ];
+
+            locations.forEach(loc => {
+                L.marker([loc.lat, loc.lng])
+                    .addTo(map)
+                    .bindPopup(`<b>${loc.name}</b><br>短暂捏合选择`);
+            });
+        }
+
+        // ==================== 手势识别逻辑 ====================
+
+        // 检测拇指+食指是否捏合（用于平移）
+        function isIndexPinch(landmarks) {
+            const thumbTip = landmarks[4];
+            const indexTip = landmarks[8];
+            const distance = Math.sqrt(
+                Math.pow(thumbTip.x - indexTip.x, 2) +
+                Math.pow(thumbTip.y - indexTip.y, 2)
+            );
+            return distance < 0.07;
+        }
+
+        // 检测拇指+中指是否捏合（用于点击选择）
+        function isMiddlePinch(landmarks) {
+            const thumbTip = landmarks[4];
+            const middleTip = landmarks[12];
+            const distance = Math.sqrt(
+                Math.pow(thumbTip.x - middleTip.x, 2) +
+                Math.pow(thumbTip.y - middleTip.y, 2)
+            );
+            return distance < 0.07;
+        }
+
+        // 检测手指是否伸出
+        function isFingerExtended(landmarks, tipIdx, pipIdx) {
+            return landmarks[tipIdx].y < landmarks[pipIdx].y;
+        }
+
+        // 识别当前手势类型
+        function classifyGesture(landmarks) {
+            const indexUp = isFingerExtended(landmarks, 8, 6);
+            const middleUp = isFingerExtended(landmarks, 12, 10);
+            const ringUp = isFingerExtended(landmarks, 16, 14);
+            const pinkyUp = isFingerExtended(landmarks, 20, 18);
+
+            // 拇指+中指捏合 = 点击选择
+            if (isMiddlePinch(landmarks)) {
+                return 'middlepinch';
+            }
+
+            // 拇指+食指捏合 = 平移
+            if (isIndexPinch(landmarks)) {
+                return 'indexpinch';
+            }
+
+            // 张开手掌：所有手指伸出
+            if (indexUp && middleUp && ringUp && pinkyUp) {
+                return 'openpalm';
+            }
+
+            // 握拳（四指弯曲即可，拇指不强制要求位置）
+            if (!indexUp && !middleUp && !ringUp && !pinkyUp) {
+                return 'fist';
+            }
+
+            // 食指指天：只有食指伸出
+            if (indexUp && !middleUp && !ringUp && !pinkyUp) {
+                return 'pointing';
+            }
+
+            return 'other';
+        }
+
+        // ==================== 光标控制 ====================
+        function updateCursor(landmarks) {
+            const indexTip = landmarks[8];
+            // 屏幕光标需要镜像X（CSS scaleX(-1) 镜像了视频，但光标不在镜像容器内）
+            const x = (1 - indexTip.x) * window.innerWidth;
+            const y = indexTip.y * window.innerHeight;
+
+            // 平滑处理
+            handState.smoothCursorX += (x - handState.smoothCursorX) * 0.4;
+            handState.smoothCursorY += (y - handState.smoothCursorY) * 0.4;
+
+            handState.cursorX = handState.smoothCursorX;
+            handState.cursorY = handState.smoothCursorY;
+
+            cursor.style.left = handState.cursorX + 'px';
+            cursor.style.top = handState.cursorY + 'px';
+            cursor.style.display = 'block';
+        }
+
+        // ==================== 地图手势控制 ====================
+        function handleMapControl(landmarks, allHands) {
+            const gesture = classifyGesture(landmarks);
+            const now = Date.now();
+
+            // 清除光标状态
+            cursor.classList.remove('clicking', 'panning');
+
+            // ---- 双手模式：两只手都拇指+食指捏合 → 缩放 ----
+            if (allHands && allHands.length >= 2) {
+                const hand1IndexPinch = isIndexPinch(allHands[0]);
+                const hand2IndexPinch = isIndexPinch(allHands[1]);
+
+                if (hand1IndexPinch && hand2IndexPinch) {
+                    // 双手捏合缩放模式，隐藏光标
+                    cursor.style.display = 'none';
+
+                    const p1 = allHands[0][9]; // 中指根部作为手中心
+                    const p2 = allHands[1][9];
+                    const distance = Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+
+                    if (handState.lastTwoHandDistance !== null) {
+                        const delta = distance - handState.lastTwoHandDistance;
+
+                        if (Math.abs(delta) > 0.02 && now - handState.lastZoomTime > 300) {
+                            const currentZoom = map.getZoom();
+                            if (delta > 0) {
+                                map.setZoom(currentZoom + 0.5);
+                                updateGestureBadge('🤏🤏', '放大', '双手捏合后远离');
+                                highlightGuide('guide-zoom-in');
+                            } else {
+                                map.setZoom(currentZoom - 0.5);
+                                updateGestureBadge('🤏🤏', '缩小', '双手捏合后靠近');
+                                highlightGuide('guide-zoom-out');
+                            }
+                            handState.lastZoomTime = now;
+                        }
+                    }
+
+                    handState.lastTwoHandDistance = distance;
+                    handState.prevGesture = 'zoom';
+                    return;
+                }
+
+                // 两只手存在但不是都在捏合：等待或降级
+                if (!hand1IndexPinch && !hand2IndexPinch) {
+                    handState.lastTwoHandDistance = null;
+                    // 降级为单手手势，继续执行
+                } else {
+                    handState.lastTwoHandDistance = null;
+                    cursor.style.display = 'none';
+                    return;
+                }
+            } else {
+                handState.lastTwoHandDistance = null;
+            }
+
+            // ---- 单手手势 ----
+
+            // 光标跟踪食指
+            updateCursor(landmarks);
+
+            // ---- 拇指+食指捏合 = 地图平移（捏合后拖动） ----
+            if (gesture === 'indexpinch') {
+                if (handState.prevGesture !== 'indexpinch') {
+                    handState.panStartPos = { x: handState.cursorX, y: handState.cursorY };
+                    handState.mapStartCenter = map.getCenter();
+                    handState.isPanning = false;
+                    handState.pinchStartTime = now;
+                }
+
+                cursor.classList.add('panning');
+                cursorLabel.textContent = '平移中';
+
+                if (handState.panStartPos) {
+                    const dx = handState.panStartPos.x - handState.cursorX;
+                    const dy = handState.panStartPos.y - handState.cursorY;
+
+                    if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+                        handState.isPanning = true;
+                        const mapPoint = map.latLngToContainerPoint(handState.mapStartCenter);
+                        const newPoint = L.point(mapPoint.x + dx * 1.5, mapPoint.y + dy * 1.5);
+                        const newCenter = map.containerPointToLatLng(newPoint);
+                        map.panTo(newCenter, { animate: false });
+                    }
+                }
+
+                updateGestureBadge('🤏', '地图平移', handState.isPanning ? '拖动平移中' : '捏合后拖动');
+                highlightGuide('guide-pan');
+
+            // ---- 拇指+中指捏合 = 点击选择 ----
+            } else if (gesture === 'middlepinch') {
+                if (handState.prevGesture !== 'middlepinch' && !handState.pinchCooldown) {
+                    performClick();
+                    handState.pinchCooldown = true;
+                    setTimeout(() => { handState.pinchCooldown = false; }, 600);
+                }
+                cursor.classList.add('clicking');
+                cursorLabel.textContent = '选择';
+                updateGestureBadge('🤏', '点击选择', '拇指+中指捏合');
+                highlightGuide('guide-click');
+
+            // ---- 食指指天 = 光标悬停 ----
+            } else if (gesture === 'pointing') {
+                cursorLabel.textContent = '悬停';
+                updateGestureBadge('☝️', '光标控制', '移动食指控制光标');
+                highlightGuide('guide-hover');
+
+            // ---- 握拳 = 缩小（需要先张开手掌再握拳的组合手势） ----
+            } else if (gesture === 'fist') {
+                if (handState.zoomOutStep === 1) {
+                    // 第二步：张开手掌后握拳 → 触发缩小（高灵敏度）
+                    if (now - handState.lastZoomTime > 200) {
+                        map.setZoom(map.getZoom() - 1);
+                        handState.lastZoomTime = now;
+                    }
+                    handState.zoomOutStep = 2;
+                    updateGestureBadge('✊', '缩小地图', '张开→握拳 缩小成功');
+                    highlightGuide('guide-zoom-out');
+                    // 重置组合手势
+                    clearTimeout(handState.zoomOutTimeout);
+                    handState.zoomOutTimeout = setTimeout(() => { handState.zoomOutStep = 0; }, 1000);
+                } else {
+                    // 未先张开手掌，普通握拳不触发
+                    cursorLabel.textContent = '...';
+                }
+
+            // ---- 张开手掌 = 缩小第一步（准备） ----
+            } else if (gesture === 'openpalm') {
+                if (handState.zoomOutStep === 0) {
+                    handState.zoomOutStep = 1;
+                    updateGestureBadge('🖐', '缩小准备', '请握拳完成缩小');
+                    highlightGuide('guide-zoom-out');
+                    // 5秒内未握拳则重置（给足时间）
+                    clearTimeout(handState.zoomOutTimeout);
+                    handState.zoomOutTimeout = setTimeout(() => { handState.zoomOutStep = 0; }, 5000);
+                } else if (handState.zoomOutStep === 1) {
+                    cursorLabel.textContent = '准备缩小';
+                    updateGestureBadge('🖐', '缩小准备', '请握拳完成缩小');
+                    highlightGuide('guide-zoom-out');
+                }
+
+            // 其他
+            } else {
+                cursorLabel.textContent = '...';
+                clearGuideHighlight();
+            }
+
+            // 结束平移状态
+            if (gesture !== 'indexpinch') {
+                handState.panStartPos = null;
+                handState.isPanning = false;
+            }
+
+            handState.prevGesture = gesture;
+        }
+
+        // ==================== 点击操作 ====================
+        function performClick() {
+            cursor.style.transform = 'translate(-50%, -50%) scale(0.6)';
+            setTimeout(() => {
+                cursor.style.transform = 'translate(-50%, -50%) scale(1)';
+            }, 200);
+
+            // 模拟地图点击
+            const point = L.point(handState.cursorX, handState.cursorY);
+            const latlng = map.containerPointToLatLng(point);
+
+            // 查找附近标记
+            let nearestMarker = null;
+            let minDist = Infinity;
+
+            map.eachLayer(layer => {
+                if (layer instanceof L.Marker) {
+                    const dist = latlng.distanceTo(layer.getLatLng());
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearestMarker = layer;
+                    }
+                }
+            });
+
+            if (nearestMarker && minDist < 2000) {
+                nearestMarker.openPopup();
+            }
+
+            setTimeout(clearGuideHighlight, 1000);
+        }
+
+        // ==================== 摄像头开关 ====================
+        function toggleCamera() {
+            const panel = document.getElementById('videoPanel');
+            const reopenBtn = document.getElementById('camReopenBtn');
+
+            if (cameraActive) {
+                // 关闭摄像头
+                panel.classList.add('hidden');
+                reopenBtn.classList.add('visible');
+                cameraActive = false;
+
+                if (camera) {
+                    camera.stop();
+                }
+                cursor.style.display = 'none';
+                document.getElementById('handDot').classList.remove('on');
+                document.getElementById('camDot').classList.remove('active');
+                document.getElementById('handStatusText').textContent = '摄像头已关闭';
+                updateGestureBadge('📷', '摄像头关闭', '点击右下角重新开启');
+            } else {
+                // 重新开启摄像头
+                panel.classList.remove('hidden');
+                reopenBtn.classList.remove('visible');
+                cameraActive = true;
+
+                startCamera();
+            }
+        }
+
+        // ==================== UI 更新 ====================
+        function updateGestureBadge(icon, text, sub) {
+            document.getElementById('gestureBadge').querySelector('.icon').textContent = icon;
+            document.getElementById('gestureText').textContent = text;
+            document.getElementById('gestureSub').textContent = sub;
+        }
+
+        function highlightGuide(id) {
+            document.querySelectorAll('.gesture-item').forEach(el => el.classList.remove('active'));
+            const el = document.getElementById(id);
+            if (el) el.classList.add('active');
+        }
+
+        function clearGuideHighlight() {
+            document.querySelectorAll('.gesture-item').forEach(el => el.classList.remove('active'));
+        }
+
+        // ==================== MediaPipe 初始化 ====================
+        function initHands() {
+            hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+
+            hands.setOptions({
+                maxNumHands: 2,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.6,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults(onHandsResults);
+        }
+
+        function initFaceMesh() {
+            faceMesh = new FaceMesh({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+            });
+
+            faceMesh.setOptions({
+                maxNumFaces: 1,
+                refineLandmarks: true,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            faceMesh.onResults(onFaceResults);
+        }
+
+        function onHandsResults(results) {
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                document.getElementById('handDot').classList.add('on');
+                document.getElementById('camDot').classList.add('active');
+                document.getElementById('handStatusText').textContent = `检测到 ${results.multiHandLandmarks.length} 只手`;
+
+                // 绘制手部关键点
+                for (const landmarks of results.multiHandLandmarks) {
+                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS,
+                        {color: '#00d4ff', lineWidth: 2});
+                    drawLandmarks(canvasCtx, landmarks,
+                        {color: '#ff006e', lineWidth: 1, radius: 3});
+
+                    // 高亮五个手指指尖（绿色光标）
+                    const fingerTips = [4, 8, 12, 16, 20]; // 拇指、食指、中指、无名指、小指
+                    for (const tipIdx of fingerTips) {
+                        const tip = landmarks[tipIdx];
+                        const x = tip.x * canvasElement.width;
+                        const y = tip.y * canvasElement.height;
+                        canvasCtx.beginPath();
+                        canvasCtx.arc(x, y, 6, 0, 2 * Math.PI);
+                        canvasCtx.fillStyle = '#00ff88';
+                        canvasCtx.fill();
+                        // 白色边框
+                        canvasCtx.strokeStyle = '#ffffff';
+                        canvasCtx.lineWidth = 1.5;
+                        canvasCtx.stroke();
+                    }
+                }
+
+                // 主手控制光标和地图
+                handleMapControl(results.multiHandLandmarks[0], results.multiHandLandmarks);
+            } else {
+                document.getElementById('handDot').classList.remove('on');
+                document.getElementById('camDot').classList.remove('active');
+                document.getElementById('handStatusText').textContent = '手部未检测';
+                cursor.style.display = 'none';
+                updateGestureBadge('✋', '等待手势', '请将手放在摄像头前');
+                handState.prevGesture = 'none';
+                handState.panStartPos = null;
+                clearGuideHighlight();
+            }
+
+            canvasCtx.restore();
+
+            // FPS
+            frameCount++;
+            const now = performance.now();
+            if (now - lastTime >= 1000) {
+                fps = frameCount;
+                frameCount = 0;
+                lastTime = now;
+                document.getElementById('fpsDisplay').textContent = `FPS: ${fps}`;
+            }
+        }
+
+        function onFaceResults(results) {
+            if (results.multiFaceLandmarks) {
+                for (const landmarks of results.multiFaceLandmarks) {
+                    drawConnectors(canvasCtx, landmarks, FACEMESH_TESSELATION,
+                        {color: 'rgba(0, 255, 136, 0.15)', lineWidth: 1});
+                }
+            }
+        }
+
+        // ==================== 系统启动 ====================
+        async function startCamera() {
+            try {
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await hands.send({image: videoElement});
+                        await faceMesh.send({image: videoElement});
+                    },
+                    width: 320,
+                    height: 240
+                });
+
+                await camera.start();
+                isRunning = true;
+            } catch (error) {
+                console.error('启动失败:', error);
+                alert('无法访问摄像头，请检查权限设置。');
+            }
+        }
+
+        async function startSystem() {
+            document.getElementById('startOverlay').classList.add('hidden');
+            await startCamera();
+        }
+
+        // ==================== 初始化 ====================
+        async function init() {
+            initMap();
+            initHands();
+            initFaceMesh();
+
+            canvasElement.width = 320;
+            canvasElement.height = 240;
+
+            setTimeout(() => {
+                document.getElementById('loadingOverlay').classList.add('hidden');
+            }, 1500);
+        }
+
+        window.addEventListener('load', init);
+
+        // 窗口大小调整
+        window.addEventListener('resize', () => {
+            if (map) map.invalidateSize();
+        });
+    </script>
+</body>
+</html>
