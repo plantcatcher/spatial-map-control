@@ -2,6 +2,8 @@
 
 基于 Google MediaPipe 的手势识别空间交互地图系统。通过摄像头实时捕捉手势，实现对天地图的平移、缩放、点击等操作，无需触摸屏幕。
 
+Demo网址链接：[Spatial Map Control](https://spactrl.planetgis.cn/)
+
 ## 功能特性
 
 - 实时手部关键点检测（21 个 3D 地标点）
